@@ -30,6 +30,7 @@ struct file_result {
     char *path;
     size_t slot;
     bool counted;
+    bool binary;
     long blank;
     long comment;
     long code;
@@ -125,6 +126,7 @@ static int collect_file(void *ctxp, const char *path)
     }
     fr->slot = slot;
     fr->counted = false;
+    fr->binary = false;
     fr->blank = 0;
     fr->comment = 0;
     fr->code = 0;
@@ -141,7 +143,7 @@ static void run_one(struct counter_ctx *ctx, size_t tid, size_t idx)
     struct line_counts counts;
     int rc = count_file(fr->path, lang, &counts);
     if (rc == 1) {
-        fprintf(stderr, "yalocc: skipping binary file: %s\n", fr->path);
+        fr->binary = true;
         return;
     }
     if (rc == -1) {
@@ -596,6 +598,14 @@ int main(int argc, char **argv)
             totals[j].code += thread_totals[i * (nlangs + 1) + j].code;
         }
     }
+
+    size_t nbinary = 0;
+    for (size_t i = 0; i < ctx.nresults; i++) {
+        if (ctx.results[i].binary)
+            nbinary++;
+    }
+    if (nbinary > 0)
+        fprintf(stderr, "yalocc: skipped %zu binary file%s\n", nbinary, nbinary == 1 ? "" : "s");
 
     print_report(&ctx);
 
