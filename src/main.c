@@ -34,13 +34,17 @@ struct counter_ctx {
     size_t slots;
     struct totals *totals;
     bool by_file;
+    const char *const *include_langs;
+    size_t ninclude_langs;
+    const char *const *exclude_langs;
+    size_t nexclude_langs;
     struct file_result *files;
     size_t nfiles;
     size_t files_cap;
 };
 
 static const struct language unknown_language = {
-    "Unknown", NULL, NULL, NULL, false, false, NULL,
+    "Unknown", NULL, NULL, NULL, false, false, NULL, NULL,
 };
 
 static size_t slot_for(struct counter_ctx *ctx, const struct language *lang)
@@ -52,12 +56,47 @@ static size_t slot_for(struct counter_ctx *ctx, const struct language *lang)
     return ctx->slots - 1;
 }
 
+static bool language_name_exists(const char *name)
+{
+    if (strcmp(name, "Unknown") == 0)
+        return true;
+    for (size_t i = 0; i < language_count(); i++) {
+        if (strcmp(language_by_index(i)->name, name) == 0)
+            return true;
+    }
+    return false;
+}
+
+static bool lang_allowed(const struct counter_ctx *ctx, size_t slot)
+{
+    const char *name = slot == language_count() ? "Unknown" : language_by_index(slot)->name;
+    if (ctx->ninclude_langs > 0) {
+        bool found = false;
+        for (size_t i = 0; i < ctx->ninclude_langs; i++) {
+            if (strcmp(name, ctx->include_langs[i]) == 0) {
+                found = true;
+                break;
+            }
+        }
+        if (!found)
+            return false;
+    }
+    for (size_t i = 0; i < ctx->nexclude_langs; i++) {
+        if (strcmp(name, ctx->exclude_langs[i]) == 0)
+            return false;
+    }
+    return true;
+}
+
 static int on_file(void *ctxp, const char *path)
 {
     struct counter_ctx *ctx = ctxp;
     const struct language *lang = find_language(path);
     if (lang == NULL)
         lang = &unknown_language;
+    size_t slot = slot_for(ctx, lang);
+    if (!lang_allowed(ctx, slot))
+        return 0;
 
     struct line_counts counts;
     int rc = count_file(path, lang, &counts);
@@ -70,7 +109,6 @@ static int on_file(void *ctxp, const char *path)
         return 0;
     }
 
-    size_t slot = slot_for(ctx, lang);
     struct totals *t = &ctx->totals[slot];
     t->files++;
     t->blank += counts.blank;
@@ -109,9 +147,12 @@ static void usage(FILE *out)
     fprintf(out, "Count blank, comment, and code lines in source files.\n");
     fprintf(out, "\n");
     fprintf(out, "Options:\n");
-    fprintf(out, "  -h, --help       Show this help\n");
-    fprintf(out, "  -V, --version    Show version\n");
-    fprintf(out, "      --by-file    Show counts for every file\n");
+    fprintf(out, "  -h, --help            Show this help\n");
+    fprintf(out, "  -V, --version         Show version\n");
+    fprintf(out, "      --by-file         Show counts for every file\n");
+    fprintf(out, "      --exclude-dir N   Skip directories named N (repeatable)\n");
+    fprintf(out, "      --include-lang N  Count only languages named N (repeatable)\n");
+    fprintf(out, "      --exclude-lang N  Skip languages named N (repeatable)\n");
 }
 
 static const char *display_path(const char *path)
@@ -275,26 +316,55 @@ int main(int argc, char **argv)
     const char *paths[argc];
     size_t npaths = 0;
     bool by_file = false;
+    const char *skip_dirs[argc];
+    size_t nskip_dirs = 0;
+    const char *include_langs[argc];
+    size_t ninclude_langs = 0;
+    const char *exclude_langs[argc];
+    size_t nexclude_langs = 0;
 
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+        const char *arg = argv[i];
+        if (strcmp(arg, "-h") == 0 || strcmp(arg, "--help") == 0) {
             usage(stdout);
             return 0;
         }
-        if (strcmp(argv[i], "-V") == 0 || strcmp(argv[i], "--version") == 0) {
+        if (strcmp(arg, "-V") == 0 || strcmp(arg, "--version") == 0) {
             printf("yalocc %s\n", VERSION);
             return 0;
         }
-        if (strcmp(argv[i], "--by-file") == 0) {
+        if (strcmp(arg, "--by-file") == 0) {
             by_file = true;
             continue;
         }
-        if (argv[i][0] == '-' && argv[i][1] != '\0') {
-            fprintf(stderr, "yalocc: unknown option: %s\n", argv[i]);
+        if (strcmp(arg, "--exclude-dir") == 0 || strcmp(arg, "--include-lang") == 0 ||
+            strcmp(arg, "--exclude-lang") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "yalocc: missing argument for %s\n", arg);
+                usage(stderr);
+                return 1;
+            }
+            const char *value = argv[++i];
+            if (strcmp(arg, "--exclude-dir") == 0) {
+                skip_dirs[nskip_dirs++] = value;
+                continue;
+            }
+            if (!language_name_exists(value)) {
+                fprintf(stderr, "yalocc: unknown language: %s\n", value);
+                return 1;
+            }
+            if (strcmp(arg, "--include-lang") == 0)
+                include_langs[ninclude_langs++] = value;
+            else
+                exclude_langs[nexclude_langs++] = value;
+            continue;
+        }
+        if (arg[0] == '-' && arg[1] != '\0') {
+            fprintf(stderr, "yalocc: unknown option: %s\n", arg);
             usage(stderr);
             return 1;
         }
-        paths[npaths++] = argv[i];
+        paths[npaths++] = arg;
     }
 
     if (npaths == 0)
@@ -308,8 +378,12 @@ int main(int argc, char **argv)
         .slots = nlangs + 1,
         .totals = totals,
         .by_file = by_file,
+        .include_langs = include_langs,
+        .ninclude_langs = ninclude_langs,
+        .exclude_langs = exclude_langs,
+        .nexclude_langs = nexclude_langs,
     };
-    int walk_rc = walk_paths(paths, npaths, on_file, &ctx);
+    int walk_rc = walk_paths(paths, npaths, skip_dirs, nskip_dirs, on_file, &ctx);
 
     print_report(&ctx);
 

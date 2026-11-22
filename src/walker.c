@@ -13,7 +13,21 @@
 
 static const char *const skipped_dirs[] = {".git", ".hg", ".svn", ".bzr", ".cvs", NULL};
 
-static int walk_dir(const char *path, yalocc_file_cb cb, void *ctx)
+static bool dir_is_skipped(const char *name, const char *const *skip_dirs, size_t nskip_dirs)
+{
+    for (size_t i = 0; skipped_dirs[i] != NULL; i++) {
+        if (strcmp(name, skipped_dirs[i]) == 0)
+            return true;
+    }
+    for (size_t i = 0; i < nskip_dirs; i++) {
+        if (strcmp(name, skip_dirs[i]) == 0)
+            return true;
+    }
+    return false;
+}
+
+static int walk_dir(const char *path, const char *const *skip_dirs, size_t nskip_dirs,
+                    yalocc_file_cb cb, void *ctx)
 {
     DIR *dir = opendir(path);
     if (dir == NULL) {
@@ -27,14 +41,7 @@ static int walk_dir(const char *path, yalocc_file_cb cb, void *ctx)
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
             continue;
 
-        bool skip = false;
-        for (size_t i = 0; skipped_dirs[i] != NULL; i++) {
-            if (strcmp(entry->d_name, skipped_dirs[i]) == 0) {
-                skip = true;
-                break;
-            }
-        }
-        if (skip)
+        if (dir_is_skipped(entry->d_name, skip_dirs, nskip_dirs))
             continue;
 
         char child[PATH_BUF_SIZE];
@@ -50,7 +57,7 @@ static int walk_dir(const char *path, yalocc_file_cb cb, void *ctx)
         }
 
         if (S_ISDIR(st.st_mode))
-            rc = walk_dir(child, cb, ctx);
+            rc = walk_dir(child, skip_dirs, nskip_dirs, cb, ctx);
         else if (S_ISREG(st.st_mode))
             rc = cb(ctx, child);
     }
@@ -59,7 +66,8 @@ static int walk_dir(const char *path, yalocc_file_cb cb, void *ctx)
     return rc;
 }
 
-int walk_paths(const char *const *paths, size_t count, yalocc_file_cb cb, void *ctx)
+int walk_paths(const char *const *paths, size_t count, const char *const *skip_dirs,
+               size_t nskip_dirs, yalocc_file_cb cb, void *ctx)
 {
     int status = 0;
     for (size_t i = 0; i < count; i++) {
@@ -70,7 +78,7 @@ int walk_paths(const char *const *paths, size_t count, yalocc_file_cb cb, void *
             continue;
         }
         if (S_ISDIR(st.st_mode)) {
-            if (walk_dir(paths[i], cb, ctx) != 0)
+            if (walk_dir(paths[i], skip_dirs, nskip_dirs, cb, ctx) != 0)
                 status = -1;
         } else if (S_ISREG(st.st_mode)) {
             if (cb(ctx, paths[i]) != 0)
