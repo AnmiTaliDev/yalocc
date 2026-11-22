@@ -32,6 +32,7 @@ Options:
       --exclude-dir N   Skip directories named N (repeatable)
       --include-lang N  Count only languages named N (repeatable)
       --exclude-lang N  Skip languages named N (repeatable)
+      --list-languages  Show known language names
       --lang-file F     Read language definitions from F
       --threads N       Use N counting threads (default: CPU count)
 ```
@@ -49,7 +50,9 @@ SUM:             7    77       7  474
 -------------------------------------
 ```
 
-Language definitions are read at startup from `languages.conf` in the install data directory, or from the file given with --lang-file. A non-installed build needs `--lang-file data/languages.conf`. The file is a list of blocks, each starting with `language NAME`, followed by any of: `ext E...`, `file NAME...`, `line_comment TOKEN`, `block START END`, `strings yes|no`, `docstrings yes|no`. Lines starting with `#` are ignored.
+Options taking a value accept both `--opt value` and `--opt=value`. Language names are case-insensitive.
+
+Language definitions are read at startup from the file given with --lang-file, otherwise from `languages.conf` in the install data directory, otherwise from `languages.conf` next to the executable (meson copies it to `build/`). The file is a list of blocks, each starting with `language NAME`, followed by any of: `ext E...`, `file NAME...`, `line_comment TOKEN`, `block START END`, `strings yes|no`, `docstrings yes|no`. Lines starting with `#` are ignored.
 
 Languages are detected by extension or by exact file name (for example Makefile, Dockerfile, CMakeLists.txt, meson.build). Files with unrecognized names are grouped under "Unknown". Binary files are skipped. Version control directories (.git, .hg, .svn, .bzr, .cvs) are not traversed, and directories can be excluded with --exclude-dir. Language filters accept the name "Unknown" for files with unrecognized extensions. Files are counted in parallel, one thread per CPU by default, configurable with --threads. With --by-file every counted file is listed under its language.
 

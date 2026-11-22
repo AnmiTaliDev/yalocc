@@ -29,3 +29,5 @@ executable(
 )
 
 install_data('data/languages.conf', install_dir: lang_dir)
+
+configure_file(input: 'data/languages.conf', output: 'languages.conf', copy: true)
