@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 #include <errno.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,12 +18,25 @@ struct totals {
 
 struct report_entry {
     const char *name;
+    size_t slot;
     struct totals totals;
+};
+
+struct file_result {
+    char *path;
+    size_t slot;
+    long blank;
+    long comment;
+    long code;
 };
 
 struct counter_ctx {
     size_t slots;
     struct totals *totals;
+    bool by_file;
+    struct file_result *files;
+    size_t nfiles;
+    size_t files_cap;
 };
 
 static const struct language unknown_language = {
@@ -56,11 +70,36 @@ static int on_file(void *ctxp, const char *path)
         return 0;
     }
 
-    struct totals *t = &ctx->totals[slot_for(ctx, lang)];
+    size_t slot = slot_for(ctx, lang);
+    struct totals *t = &ctx->totals[slot];
     t->files++;
     t->blank += counts.blank;
     t->comment += counts.comment;
     t->code += counts.code;
+
+    if (ctx->by_file) {
+        if (ctx->nfiles == ctx->files_cap) {
+            size_t new_cap = ctx->files_cap == 0 ? 64 : ctx->files_cap * 2;
+            struct file_result *grown = realloc(ctx->files, new_cap * sizeof(ctx->files[0]));
+            if (grown == NULL) {
+                fprintf(stderr, "yalocc: out of memory\n");
+                return -1;
+            }
+            ctx->files = grown;
+            ctx->files_cap = new_cap;
+        }
+        struct file_result *fr = &ctx->files[ctx->nfiles];
+        fr->path = strdup(path);
+        if (fr->path == NULL) {
+            fprintf(stderr, "yalocc: out of memory\n");
+            return -1;
+        }
+        fr->slot = slot;
+        fr->blank = counts.blank;
+        fr->comment = counts.comment;
+        fr->code = counts.code;
+        ctx->nfiles++;
+    }
     return 0;
 }
 
@@ -72,6 +111,12 @@ static void usage(FILE *out)
     fprintf(out, "Options:\n");
     fprintf(out, "  -h, --help       Show this help\n");
     fprintf(out, "  -V, --version    Show version\n");
+    fprintf(out, "      --by-file    Show counts for every file\n");
+}
+
+static const char *display_path(const char *path)
+{
+    return strncmp(path, "./", 2) == 0 ? path + 2 : path;
 }
 
 static size_t num_width(long value)
@@ -88,6 +133,13 @@ static int entry_cmp(const void *a, const void *b)
     return strcmp(ea->name, eb->name);
 }
 
+static int file_cmp(const void *a, const void *b)
+{
+    const struct file_result *const *fa = a;
+    const struct file_result *const *fb = b;
+    return strcmp(display_path((*fa)->path), display_path((*fb)->path));
+}
+
 static void print_dashes(size_t width)
 {
     for (size_t i = 0; i < width; i++)
@@ -95,20 +147,52 @@ static void print_dashes(size_t width)
     putchar('\n');
 }
 
-static void print_report(struct totals *totals, size_t nlangs)
+static void print_file_rows(struct counter_ctx *ctx, size_t slot, size_t name_w,
+                            size_t files_w, size_t blank_w, size_t comment_w, size_t code_w)
 {
+    size_t count = 0;
+    for (size_t i = 0; i < ctx->nfiles; i++) {
+        if (ctx->files[i].slot == slot)
+            count++;
+    }
+    if (count == 0)
+        return;
+
+    struct file_result *rows[count];
+    size_t k = 0;
+    for (size_t i = 0; i < ctx->nfiles; i++) {
+        if (ctx->files[i].slot == slot)
+            rows[k++] = &ctx->files[i];
+    }
+    qsort(rows, count, sizeof(rows[0]), file_cmp);
+
+    for (size_t i = 0; i < count; i++) {
+        const struct file_result *fr = rows[i];
+        printf(" %-*s %*ld %*ld %*ld %*ld\n", (int)name_w - 1, display_path(fr->path),
+               (int)files_w, 1L, (int)blank_w, fr->blank, (int)comment_w, fr->comment,
+               (int)code_w, fr->code);
+    }
+}
+
+static void print_report(struct counter_ctx *ctx)
+{
+    size_t nlangs = language_count();
+    struct totals *totals = ctx->totals;
+
     struct report_entry entries[nlangs + 1];
     size_t nentries = 0;
 
     for (size_t i = 0; i < nlangs; i++) {
         if (totals[i].files > 0) {
             entries[nentries].name = language_by_index(i)->name;
+            entries[nentries].slot = i;
             entries[nentries].totals = totals[i];
             nentries++;
         }
     }
     if (totals[nlangs].files > 0) {
         entries[nentries].name = "Unknown";
+        entries[nentries].slot = nlangs;
         entries[nentries].totals = totals[nlangs];
         nentries++;
     }
@@ -151,6 +235,13 @@ static void print_report(struct totals *totals, size_t nlangs)
         if (w > code_w)
             code_w = w;
     }
+    if (ctx->by_file) {
+        for (size_t i = 0; i < ctx->nfiles; i++) {
+            size_t w = strlen(display_path(ctx->files[i].path)) + 1;
+            if (w > name_w)
+                name_w = w;
+        }
+    }
     if (num_width(sum.files) > files_w)
         files_w = num_width(sum.files);
     if (num_width(sum.blank) > blank_w)
@@ -170,6 +261,8 @@ static void print_report(struct totals *totals, size_t nlangs)
         printf("%-*s %*ld %*ld %*ld %*ld\n", (int)name_w, entries[i].name,
                (int)files_w, entries[i].totals.files, (int)blank_w, entries[i].totals.blank,
                (int)comment_w, entries[i].totals.comment, (int)code_w, entries[i].totals.code);
+        if (ctx->by_file)
+            print_file_rows(ctx, entries[i].slot, name_w, files_w, blank_w, comment_w, code_w);
     }
     print_dashes(table_w);
     printf("%-*s %*ld %*ld %*ld %*ld\n", (int)name_w, "SUM:", (int)files_w, sum.files,
@@ -181,6 +274,7 @@ int main(int argc, char **argv)
 {
     const char *paths[argc];
     size_t npaths = 0;
+    bool by_file = false;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
@@ -190,6 +284,10 @@ int main(int argc, char **argv)
         if (strcmp(argv[i], "-V") == 0 || strcmp(argv[i], "--version") == 0) {
             printf("yalocc %s\n", VERSION);
             return 0;
+        }
+        if (strcmp(argv[i], "--by-file") == 0) {
+            by_file = true;
+            continue;
         }
         if (argv[i][0] == '-' && argv[i][1] != '\0') {
             fprintf(stderr, "yalocc: unknown option: %s\n", argv[i]);
@@ -206,9 +304,17 @@ int main(int argc, char **argv)
     struct totals totals[nlangs + 1];
     memset(totals, 0, sizeof(totals));
 
-    struct counter_ctx ctx = {nlangs + 1, totals};
+    struct counter_ctx ctx = {
+        .slots = nlangs + 1,
+        .totals = totals,
+        .by_file = by_file,
+    };
     int walk_rc = walk_paths(paths, npaths, on_file, &ctx);
 
-    print_report(totals, nlangs);
+    print_report(&ctx);
+
+    for (size_t i = 0; i < ctx.nfiles; i++)
+        free(ctx.files[i].path);
+    free(ctx.files);
     return walk_rc == 0 ? 0 : 1;
 }

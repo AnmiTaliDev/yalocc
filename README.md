@@ -28,6 +28,7 @@ Options:
 ```
   -h, --help       Show this help
   -V, --version    Show version
+      --by-file    Show counts for every file
 ```
 
 Paths may be files or directories. Without arguments the current directory is scanned. Example output:
@@ -43,7 +44,7 @@ SUM:             7    77       7  474
 -------------------------------------
 ```
 
-Files with unrecognized extensions are grouped under "Unknown". Binary files are skipped. Version control directories (.git, .hg, .svn, .bzr, .cvs) are not traversed.
+Files with unrecognized extensions are grouped under "Unknown". Binary files are skipped. Version control directories (.git, .hg, .svn, .bzr, .cvs) are not traversed. With --by-file every counted file is listed under its language.
 
 ## License
 
