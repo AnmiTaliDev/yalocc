@@ -9,6 +9,8 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
+#include "gitignore.h"
+
 #define PATH_BUF_SIZE 4096
 
 static const char *const skipped_dirs[] = {".git", ".hg", ".svn", ".bzr", ".cvs", NULL};
@@ -27,7 +29,7 @@ static bool dir_is_skipped(const char *name, const char *const *skip_dirs, size_
 }
 
 static int walk_dir(const char *path, const char *const *skip_dirs, size_t nskip_dirs,
-                    yalocc_file_cb cb, void *ctx)
+                    struct ignore_set *ignores, yalocc_file_cb cb, void *ctx)
 {
     DIR *dir = opendir(path);
     if (dir == NULL) {
@@ -35,7 +37,12 @@ static int walk_dir(const char *path, const char *const *skip_dirs, size_t nskip
         return 0;
     }
 
+    size_t ignore_mark = 0;
     int rc = 0;
+    if (ignores != NULL) {
+        ignore_mark = ignores->count;
+        rc = ignore_load(ignores, path);
+    }
     struct dirent *entry;
     while (rc == 0 && (entry = readdir(dir)) != NULL) {
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
@@ -56,19 +63,26 @@ static int walk_dir(const char *path, const char *const *skip_dirs, size_t nskip
             continue;
         }
 
+        if (ignores != NULL && ignore_matches(ignores, child, S_ISDIR(st.st_mode)))
+            continue;
+
         if (S_ISDIR(st.st_mode))
-            rc = walk_dir(child, skip_dirs, nskip_dirs, cb, ctx);
+            rc = walk_dir(child, skip_dirs, nskip_dirs, ignores, cb, ctx);
         else if (S_ISREG(st.st_mode))
             rc = cb(ctx, child);
     }
 
     closedir(dir);
+    if (ignores != NULL)
+        ignore_truncate(ignores, ignore_mark);
     return rc;
 }
 
 int walk_paths(const char *const *paths, size_t count, const char *const *skip_dirs,
-               size_t nskip_dirs, yalocc_file_cb cb, void *ctx)
+               size_t nskip_dirs, bool use_gitignore, yalocc_file_cb cb, void *ctx)
 {
+    struct ignore_set ignore_storage = {0};
+    struct ignore_set *ignores = use_gitignore ? &ignore_storage : NULL;
     int status = 0;
     for (size_t i = 0; i < count; i++) {
         struct stat st;
@@ -78,7 +92,7 @@ int walk_paths(const char *const *paths, size_t count, const char *const *skip_d
             continue;
         }
         if (S_ISDIR(st.st_mode)) {
-            if (walk_dir(paths[i], skip_dirs, nskip_dirs, cb, ctx) != 0)
+            if (walk_dir(paths[i], skip_dirs, nskip_dirs, ignores, cb, ctx) != 0)
                 status = -1;
         } else if (S_ISREG(st.st_mode)) {
             if (cb(ctx, paths[i]) != 0)
@@ -88,5 +102,6 @@ int walk_paths(const char *const *paths, size_t count, const char *const *skip_d
             status = -1;
         }
     }
+    ignore_free(&ignore_storage);
     return status;
 }

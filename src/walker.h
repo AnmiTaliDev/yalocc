@@ -2,11 +2,12 @@
 #ifndef YALOCC_WALKER_H
 #define YALOCC_WALKER_H
 
+#include <stdbool.h>
 #include <stddef.h>
 
 typedef int (*yalocc_file_cb)(void *ctx, const char *path);
 
 int walk_paths(const char *const *paths, size_t count, const char *const *skip_dirs,
-               size_t nskip_dirs, yalocc_file_cb cb, void *ctx);
+               size_t nskip_dirs, bool use_gitignore, yalocc_file_cb cb, void *ctx);
 
 #endif

@@ -22,6 +22,7 @@ executable(
     'src/languages.c',
     'src/counter.c',
     'src/walker.c',
+    'src/gitignore.c',
   ],
   include_directories: 'src',
   dependencies: dependency('threads'),

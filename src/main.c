@@ -80,6 +80,8 @@ static bool language_name_exists(const char *name)
 static bool lang_allowed(const struct counter_ctx *ctx, size_t slot)
 {
     const char *name = slot == language_count() ? "Unknown" : language_by_index(slot)->name;
+    if (slot == language_count() && ctx->ninclude_langs == 0)
+        return false;
     if (ctx->ninclude_langs > 0) {
         bool found = false;
         for (size_t i = 0; i < ctx->ninclude_langs; i++) {
@@ -240,6 +242,7 @@ static void usage(FILE *out)
     fprintf(out, "      --include-lang N  Count only languages named N (repeatable)\n");
     fprintf(out, "      --exclude-lang N  Skip languages named N (repeatable)\n");
     fprintf(out, "      --list-languages  Show known language names\n");
+    fprintf(out, "      --no-gitignore    Do not apply .gitignore files\n");
     fprintf(out, "      --lang-file F     Read language definitions from F\n");
     fprintf(out, "      --threads N       Use N counting threads (default: CPU count)\n");
 }
@@ -478,6 +481,7 @@ int main(int argc, char **argv)
     size_t threads = default_thread_count();
     const char *lang_file = NULL;
     bool list_langs = false;
+    bool use_gitignore = true;
 
     for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
@@ -491,6 +495,10 @@ int main(int argc, char **argv)
         }
         if (strcmp(arg, "--by-file") == 0) {
             by_file = true;
+            continue;
+        }
+        if (strcmp(arg, "--no-gitignore") == 0) {
+            use_gitignore = false;
             continue;
         }
         if (strcmp(arg, "--list-languages") == 0) {
@@ -582,7 +590,7 @@ int main(int argc, char **argv)
         .threads = threads,
     };
 
-    int walk_rc = walk_paths(paths, npaths, skip_dirs, nskip_dirs, collect_file, &ctx);
+    int walk_rc = walk_paths(paths, npaths, skip_dirs, nskip_dirs, use_gitignore, collect_file, &ctx);
 
     struct totals thread_totals[threads * (nlangs + 1)];
     memset(thread_totals, 0, sizeof(thread_totals));
