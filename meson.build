@@ -23,6 +23,8 @@ executable(
     'src/counter.c',
     'src/walker.c',
     'src/gitignore.c',
+    'src/scan.c',
+    'src/report.c',
   ],
   include_directories: 'src',
   dependencies: dependency('threads'),
