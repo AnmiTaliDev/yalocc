@@ -1,0 +1,19 @@
+pkgname=yalocc
+pkgver=@VERSION@
+pkgrel=0
+pkgdesc="Count blank, comment, and code lines in source files"
+url="@URL@"
+arch="all"
+license="GPL-3.0-only"
+makedepends="meson"
+options="!check"
+source="$pkgname-$pkgver.tar.gz"
+
+build() {
+	abuild-meson . output
+	meson compile -C output
+}
+
+package() {
+	DESTDIR="$pkgdir" meson install --no-rebuild -C output
+}

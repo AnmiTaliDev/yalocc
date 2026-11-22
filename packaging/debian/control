@@ -1,0 +1,15 @@
+Source: yalocc
+Section: devel
+Priority: optional
+Maintainer: yalocc <noreply@anmitali.dev>
+Build-Depends: debhelper-compat (= 13), meson, ninja-build, gcc
+Standards-Version: 4.6.2
+Homepage: @URL@
+Rules-Requires-Root: no
+
+Package: yalocc
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: count blank, comment, and code lines in source files
+ Command-line tool that counts blank, comment, and code lines in source
+ files and reports totals per language.
