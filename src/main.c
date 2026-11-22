@@ -1,9 +1,11 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 #include <errno.h>
+#include <pthread.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "counter.h"
 #include "languages.h"
@@ -25,6 +27,7 @@ struct report_entry {
 struct file_result {
     char *path;
     size_t slot;
+    bool counted;
     long blank;
     long comment;
     long code;
@@ -38,9 +41,13 @@ struct counter_ctx {
     size_t ninclude_langs;
     const char *const *exclude_langs;
     size_t nexclude_langs;
-    struct file_result *files;
-    size_t nfiles;
-    size_t files_cap;
+    struct file_result *results;
+    size_t nresults;
+    size_t results_cap;
+    size_t threads;
+    size_t next_file;
+    pthread_mutex_t queue_lock;
+    struct totals *thread_totals;
 };
 
 static const struct language unknown_language = {
@@ -88,7 +95,7 @@ static bool lang_allowed(const struct counter_ctx *ctx, size_t slot)
     return true;
 }
 
-static int on_file(void *ctxp, const char *path)
+static int collect_file(void *ctxp, const char *path)
 {
     struct counter_ctx *ctx = ctxp;
     const struct language *lang = find_language(path);
@@ -98,47 +105,122 @@ static int on_file(void *ctxp, const char *path)
     if (!lang_allowed(ctx, slot))
         return 0;
 
+    if (ctx->nresults == ctx->results_cap) {
+        size_t new_cap = ctx->results_cap == 0 ? 256 : ctx->results_cap * 2;
+        struct file_result *grown = realloc(ctx->results, new_cap * sizeof(ctx->results[0]));
+        if (grown == NULL) {
+            fprintf(stderr, "yalocc: out of memory\n");
+            return -1;
+        }
+        ctx->results = grown;
+        ctx->results_cap = new_cap;
+    }
+    struct file_result *fr = &ctx->results[ctx->nresults];
+    fr->path = strdup(path);
+    if (fr->path == NULL) {
+        fprintf(stderr, "yalocc: out of memory\n");
+        return -1;
+    }
+    fr->slot = slot;
+    fr->counted = false;
+    fr->blank = 0;
+    fr->comment = 0;
+    fr->code = 0;
+    ctx->nresults++;
+    return 0;
+}
+
+static void run_one(struct counter_ctx *ctx, size_t tid, size_t idx)
+{
+    struct file_result *fr = &ctx->results[idx];
+    const struct language *lang = (fr->slot == language_count()) ? &unknown_language
+        : language_by_index(fr->slot);
+
     struct line_counts counts;
-    int rc = count_file(path, lang, &counts);
+    int rc = count_file(fr->path, lang, &counts);
     if (rc == 1) {
-        fprintf(stderr, "yalocc: skipping binary file: %s\n", path);
-        return 0;
+        fprintf(stderr, "yalocc: skipping binary file: %s\n", fr->path);
+        return;
     }
     if (rc == -1) {
-        fprintf(stderr, "yalocc: cannot read %s: %s\n", path, strerror(errno));
-        return 0;
+        fprintf(stderr, "yalocc: cannot read %s: %s\n", fr->path, strerror(errno));
+        return;
     }
 
-    struct totals *t = &ctx->totals[slot];
+    fr->counted = true;
+    fr->blank = counts.blank;
+    fr->comment = counts.comment;
+    fr->code = counts.code;
+
+    struct totals *t = &ctx->thread_totals[tid * ctx->slots + fr->slot];
     t->files++;
     t->blank += counts.blank;
     t->comment += counts.comment;
     t->code += counts.code;
+}
 
-    if (ctx->by_file) {
-        if (ctx->nfiles == ctx->files_cap) {
-            size_t new_cap = ctx->files_cap == 0 ? 64 : ctx->files_cap * 2;
-            struct file_result *grown = realloc(ctx->files, new_cap * sizeof(ctx->files[0]));
-            if (grown == NULL) {
-                fprintf(stderr, "yalocc: out of memory\n");
-                return -1;
-            }
-            ctx->files = grown;
-            ctx->files_cap = new_cap;
-        }
-        struct file_result *fr = &ctx->files[ctx->nfiles];
-        fr->path = strdup(path);
-        if (fr->path == NULL) {
-            fprintf(stderr, "yalocc: out of memory\n");
-            return -1;
-        }
-        fr->slot = slot;
-        fr->blank = counts.blank;
-        fr->comment = counts.comment;
-        fr->code = counts.code;
-        ctx->nfiles++;
+struct worker_arg {
+    struct counter_ctx *ctx;
+    size_t tid;
+};
+
+static void *worker_main(void *argp)
+{
+    struct worker_arg *arg = argp;
+    struct counter_ctx *ctx = arg->ctx;
+    for (;;) {
+        pthread_mutex_lock(&ctx->queue_lock);
+        size_t idx = ctx->next_file;
+        if (idx < ctx->nresults)
+            ctx->next_file++;
+        pthread_mutex_unlock(&ctx->queue_lock);
+        if (idx >= ctx->nresults)
+            break;
+        run_one(ctx, arg->tid, idx);
     }
-    return 0;
+    return NULL;
+}
+
+static void run_workers(struct counter_ctx *ctx)
+{
+    if (ctx->nresults == 0)
+        return;
+
+    size_t nworkers = ctx->threads < ctx->nresults ? ctx->threads : ctx->nresults;
+    ctx->next_file = 0;
+    pthread_mutex_init(&ctx->queue_lock, NULL);
+
+    struct worker_arg *args = malloc(nworkers * sizeof(args[0]));
+    pthread_t *tids = malloc((nworkers - 1) * sizeof(tids[0]));
+    if (args == NULL || tids == NULL) {
+        fprintf(stderr, "yalocc: out of memory\n");
+        free(args);
+        free(tids);
+        nworkers = 1;
+        args = NULL;
+        tids = NULL;
+    }
+
+    size_t spawned = 0;
+    for (size_t i = 1; i < nworkers; i++) {
+        args[i].ctx = ctx;
+        args[i].tid = i;
+        if (pthread_create(&tids[i - 1], NULL, worker_main, &args[i]) != 0) {
+            fprintf(stderr, "yalocc: cannot create thread, reducing parallelism\n");
+            break;
+        }
+        spawned++;
+    }
+
+    struct worker_arg main_arg = {ctx, 0};
+    worker_main(&main_arg);
+
+    for (size_t i = 0; i < spawned; i++)
+        pthread_join(tids[i], NULL);
+
+    free(args);
+    free(tids);
+    pthread_mutex_destroy(&ctx->queue_lock);
 }
 
 static void usage(FILE *out)
@@ -153,6 +235,7 @@ static void usage(FILE *out)
     fprintf(out, "      --exclude-dir N   Skip directories named N (repeatable)\n");
     fprintf(out, "      --include-lang N  Count only languages named N (repeatable)\n");
     fprintf(out, "      --exclude-lang N  Skip languages named N (repeatable)\n");
+    fprintf(out, "      --threads N       Use N counting threads (default: CPU count)\n");
 }
 
 static const char *display_path(const char *path)
@@ -192,8 +275,8 @@ static void print_file_rows(struct counter_ctx *ctx, size_t slot, size_t name_w,
                             size_t files_w, size_t blank_w, size_t comment_w, size_t code_w)
 {
     size_t count = 0;
-    for (size_t i = 0; i < ctx->nfiles; i++) {
-        if (ctx->files[i].slot == slot)
+    for (size_t i = 0; i < ctx->nresults; i++) {
+        if (ctx->results[i].counted && ctx->results[i].slot == slot)
             count++;
     }
     if (count == 0)
@@ -201,9 +284,9 @@ static void print_file_rows(struct counter_ctx *ctx, size_t slot, size_t name_w,
 
     struct file_result *rows[count];
     size_t k = 0;
-    for (size_t i = 0; i < ctx->nfiles; i++) {
-        if (ctx->files[i].slot == slot)
-            rows[k++] = &ctx->files[i];
+    for (size_t i = 0; i < ctx->nresults; i++) {
+        if (ctx->results[i].counted && ctx->results[i].slot == slot)
+            rows[k++] = &ctx->results[i];
     }
     qsort(rows, count, sizeof(rows[0]), file_cmp);
 
@@ -277,8 +360,10 @@ static void print_report(struct counter_ctx *ctx)
             code_w = w;
     }
     if (ctx->by_file) {
-        for (size_t i = 0; i < ctx->nfiles; i++) {
-            size_t w = strlen(display_path(ctx->files[i].path)) + 1;
+        for (size_t i = 0; i < ctx->nresults; i++) {
+            if (!ctx->results[i].counted)
+                continue;
+            size_t w = strlen(display_path(ctx->results[i].path)) + 1;
             if (w > name_w)
                 name_w = w;
         }
@@ -311,6 +396,12 @@ static void print_report(struct counter_ctx *ctx)
     print_dashes(table_w);
 }
 
+static size_t default_thread_count(void)
+{
+    long ncpu = sysconf(_SC_NPROCESSORS_ONLN);
+    return ncpu > 0 ? (size_t)ncpu : 1;
+}
+
 int main(int argc, char **argv)
 {
     const char *paths[argc];
@@ -322,6 +413,7 @@ int main(int argc, char **argv)
     size_t ninclude_langs = 0;
     const char *exclude_langs[argc];
     size_t nexclude_langs = 0;
+    size_t threads = default_thread_count();
 
     for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
@@ -335,6 +427,22 @@ int main(int argc, char **argv)
         }
         if (strcmp(arg, "--by-file") == 0) {
             by_file = true;
+            continue;
+        }
+        if (strcmp(arg, "--threads") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "yalocc: missing argument for %s\n", arg);
+                usage(stderr);
+                return 1;
+            }
+            const char *value = argv[++i];
+            char *end;
+            long parsed = strtol(value, &end, 10);
+            if (end == value || *end != '\0' || parsed < 1) {
+                fprintf(stderr, "yalocc: invalid thread count: %s\n", value);
+                return 1;
+            }
+            threads = (size_t)parsed;
             continue;
         }
         if (strcmp(arg, "--exclude-dir") == 0 || strcmp(arg, "--include-lang") == 0 ||
@@ -382,13 +490,30 @@ int main(int argc, char **argv)
         .ninclude_langs = ninclude_langs,
         .exclude_langs = exclude_langs,
         .nexclude_langs = nexclude_langs,
+        .threads = threads,
     };
-    int walk_rc = walk_paths(paths, npaths, skip_dirs, nskip_dirs, on_file, &ctx);
+
+    int walk_rc = walk_paths(paths, npaths, skip_dirs, nskip_dirs, collect_file, &ctx);
+
+    struct totals thread_totals[threads * (nlangs + 1)];
+    memset(thread_totals, 0, sizeof(thread_totals));
+    ctx.thread_totals = thread_totals;
+
+    run_workers(&ctx);
+
+    for (size_t i = 0; i < threads; i++) {
+        for (size_t j = 0; j <= nlangs; j++) {
+            totals[j].files += thread_totals[i * (nlangs + 1) + j].files;
+            totals[j].blank += thread_totals[i * (nlangs + 1) + j].blank;
+            totals[j].comment += thread_totals[i * (nlangs + 1) + j].comment;
+            totals[j].code += thread_totals[i * (nlangs + 1) + j].code;
+        }
+    }
 
     print_report(&ctx);
 
-    for (size_t i = 0; i < ctx.nfiles; i++)
-        free(ctx.files[i].path);
-    free(ctx.files);
+    for (size_t i = 0; i < ctx.nresults; i++)
+        free(ctx.results[i].path);
+    free(ctx.results);
     return walk_rc == 0 ? 0 : 1;
 }

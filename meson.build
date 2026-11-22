@@ -21,4 +21,5 @@ executable(
     'src/walker.c',
   ],
   include_directories: 'src',
+  dependencies: dependency('threads'),
 )
