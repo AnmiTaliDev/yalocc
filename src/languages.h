@@ -13,6 +13,7 @@ struct language {
     bool track_strings;
     bool docstrings;
     const char *const *exts;
+    const char *const *filenames;
 };
 
 const struct language *find_language(const char *path);
