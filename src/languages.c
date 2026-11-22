@@ -1,65 +1,198 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 #include "languages.h"
 
+#include <ctype.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
-static const char *const c_exts[] = {"c", NULL};
-static const char *const header_exts[] = {"h", "hh", "hpp", "hxx", NULL};
-static const char *const cpp_exts[] = {"cpp", "cc", "cxx", NULL};
-static const char *const python_exts[] = {"py", "pyw", NULL};
-static const char *const shell_exts[] = {"sh", "bash", "zsh", NULL};
-static const char *const shell_files[] = {".bashrc", ".bash_profile", ".zshrc", ".profile", NULL};
-static const char *const go_exts[] = {"go", NULL};
-static const char *const rust_exts[] = {"rs", NULL};
-static const char *const java_exts[] = {"java", NULL};
-static const char *const js_exts[] = {"js", "mjs", "cjs", NULL};
-static const char *const ts_exts[] = {"ts", "tsx", NULL};
-static const char *const css_exts[] = {"css", NULL};
-static const char *const markdown_exts[] = {"md", "markdown", NULL};
-static const char *const yaml_exts[] = {"yml", "yaml", NULL};
-static const char *const json_exts[] = {"json", NULL};
-static const char *const toml_exts[] = {"toml", NULL};
-static const char *const lua_exts[] = {"lua", NULL};
-static const char *const ruby_exts[] = {"rb", NULL};
-static const char *const cmake_exts[] = {"cmake", NULL};
-static const char *const cmake_files[] = {"CMakeLists.txt", NULL};
-static const char *const dockerfile_exts[] = {"dockerfile", NULL};
-static const char *const dockerfile_files[] = {"Dockerfile", NULL};
-static const char *const makefile_exts[] = {"mk", NULL};
-static const char *const makefile_files[] = {"Makefile", "makefile", "GNUmakefile", "BSDmakefile", NULL};
-static const char *const meson_files[] = {"meson.build", "meson.options", "meson_options.txt", NULL};
+static struct language *languages;
+static size_t nlanguages;
+static size_t languages_cap;
 
-static const struct language languages[] = {
-    {"C", "//", "/*", "*/", true, false, c_exts, NULL},
-    {"C/C++ Header", "//", "/*", "*/", true, false, header_exts, NULL},
-    {"C++", "//", "/*", "*/", true, false, cpp_exts, NULL},
-    {"Python", "#", NULL, NULL, true, true, python_exts, NULL},
-    {"Shell", "#", NULL, NULL, true, false, shell_exts, shell_files},
-    {"Go", "//", "/*", "*/", true, false, go_exts, NULL},
-    {"Rust", "//", "/*", "*/", true, false, rust_exts, NULL},
-    {"Java", "//", "/*", "*/", true, false, java_exts, NULL},
-    {"JavaScript", "//", "/*", "*/", true, false, js_exts, NULL},
-    {"TypeScript", "//", "/*", "*/", true, false, ts_exts, NULL},
-    {"CSS", NULL, "/*", "*/", true, false, css_exts, NULL},
-    {"Markdown", NULL, "<!--", "-->", false, false, markdown_exts, NULL},
-    {"YAML", "#", NULL, NULL, false, false, yaml_exts, NULL},
-    {"JSON", NULL, NULL, NULL, false, false, json_exts, NULL},
-    {"TOML", "#", NULL, NULL, false, false, toml_exts, NULL},
-    {"Lua", "--", "--[[", "]]", true, false, lua_exts, NULL},
-    {"Ruby", "#", NULL, NULL, true, false, ruby_exts, NULL},
-    {"CMake", "#", NULL, NULL, false, false, cmake_exts, cmake_files},
-    {"Dockerfile", "#", NULL, NULL, false, false, dockerfile_exts, dockerfile_files},
-    {"Makefile", "#", NULL, NULL, false, false, makefile_exts, makefile_files},
-    {"Meson", "#", NULL, NULL, false, false, NULL, meson_files},
-};
+static char *next_token(char **cursor)
+{
+    char *p = *cursor;
+    while (isspace((unsigned char)*p))
+        p++;
+    if (*p == '\0') {
+        *cursor = p;
+        return NULL;
+    }
+    char *start = p;
+    while (*p != '\0' && !isspace((unsigned char)*p))
+        p++;
+    if (*p != '\0')
+        *p++ = '\0';
+    *cursor = p;
+    return start;
+}
 
-#define NLANGS (sizeof(languages) / sizeof(languages[0]))
+static char *copy_string(const char *s)
+{
+    char *copy = strdup(s);
+    if (copy == NULL)
+        fprintf(stderr, "yalocc: out of memory\n");
+    return copy;
+}
+
+static struct language *add_language(const char *name)
+{
+    if (nlanguages == languages_cap) {
+        size_t new_cap = languages_cap == 0 ? 32 : languages_cap * 2;
+        struct language *grown = realloc(languages, new_cap * sizeof(languages[0]));
+        if (grown == NULL) {
+            fprintf(stderr, "yalocc: out of memory\n");
+            return NULL;
+        }
+        languages = grown;
+        languages_cap = new_cap;
+    }
+    struct language *lang = &languages[nlanguages];
+    memset(lang, 0, sizeof(*lang));
+    lang->name = copy_string(name);
+    if (lang->name == NULL)
+        return NULL;
+    nlanguages++;
+    return lang;
+}
+
+static int append_names(const char *const **list, char *args)
+{
+    size_t count = 0;
+    if (*list != NULL) {
+        while ((*list)[count] != NULL)
+            count++;
+    }
+    char *tok;
+    while ((tok = next_token(&args)) != NULL) {
+        const char **grown = realloc((void *)*list, (count + 2) * sizeof(grown[0]));
+        if (grown == NULL) {
+            fprintf(stderr, "yalocc: out of memory\n");
+            return -1;
+        }
+        grown[count] = copy_string(tok);
+        if (grown[count] == NULL)
+            return -1;
+        grown[count + 1] = NULL;
+        count++;
+        *list = grown;
+    }
+    return 0;
+}
+
+static int parse_bool(const char *s, bool *out)
+{
+    if (strcmp(s, "yes") == 0)
+        *out = true;
+    else if (strcmp(s, "no") == 0)
+        *out = false;
+    else
+        return -1;
+    return 0;
+}
+
+static int apply_line(struct language *lang, const char *key, char *args, const char *path, int lineno)
+{
+    if (strcmp(key, "ext") == 0)
+        return append_names(&lang->exts, args);
+    if (strcmp(key, "file") == 0)
+        return append_names(&lang->filenames, args);
+    if (strcmp(key, "line_comment") == 0) {
+        char *tok = next_token(&args);
+        if (tok == NULL)
+            goto missing;
+        lang->line_comment = copy_string(tok);
+        return lang->line_comment == NULL ? -1 : 0;
+    }
+    if (strcmp(key, "block") == 0) {
+        char *start = next_token(&args);
+        char *end = next_token(&args);
+        if (start == NULL || end == NULL)
+            goto missing;
+        lang->block_start = copy_string(start);
+        lang->block_end = copy_string(end);
+        return lang->block_start == NULL || lang->block_end == NULL ? -1 : 0;
+    }
+    if (strcmp(key, "strings") == 0 || strcmp(key, "docstrings") == 0) {
+        char *tok = next_token(&args);
+        bool value;
+        if (tok == NULL)
+            goto missing;
+        if (parse_bool(tok, &value) != 0) {
+            fprintf(stderr, "yalocc: %s:%d: expected yes or no: %s\n", path, lineno, tok);
+            return -1;
+        }
+        if (strcmp(key, "strings") == 0)
+            lang->track_strings = value;
+        else
+            lang->docstrings = value;
+        return 0;
+    }
+    fprintf(stderr, "yalocc: %s:%d: unknown key: %s\n", path, lineno, key);
+    return -1;
+
+missing:
+    fprintf(stderr, "yalocc: %s:%d: missing value for %s\n", path, lineno, key);
+    return -1;
+}
+
+int load_languages(const char *path)
+{
+    FILE *fp = fopen(path, "r");
+    if (fp == NULL) {
+        fprintf(stderr, "yalocc: cannot open language file %s\n", path);
+        return -1;
+    }
+
+    char line[1024];
+    int lineno = 0;
+    struct language *current = NULL;
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        lineno++;
+        size_t len = strlen(line);
+        while (len > 0 && isspace((unsigned char)line[len - 1]))
+            line[--len] = '\0';
+
+        char *cursor = line;
+        char *key = next_token(&cursor);
+        if (key == NULL || key[0] == '#')
+            continue;
+
+        if (strcmp(key, "language") == 0) {
+            while (isspace((unsigned char)*cursor))
+                cursor++;
+            if (*cursor == '\0') {
+                fprintf(stderr, "yalocc: %s:%d: missing language name\n", path, lineno);
+                fclose(fp);
+                return -1;
+            }
+            current = add_language(cursor);
+            if (current == NULL) {
+                fclose(fp);
+                return -1;
+            }
+            continue;
+        }
+        if (current == NULL) {
+            fprintf(stderr, "yalocc: %s:%d: %s before any language\n", path, lineno, key);
+            fclose(fp);
+            return -1;
+        }
+        if (apply_line(current, key, cursor, path, lineno) != 0) {
+            fclose(fp);
+            return -1;
+        }
+    }
+    fclose(fp);
+    return 0;
+}
 
 const struct language *find_language(const char *path)
 {
     const char *base = strrchr(path, '/');
     base = base ? base + 1 : path;
-    for (size_t i = 0; i < NLANGS; i++) {
+    for (size_t i = 0; i < nlanguages; i++) {
         if (languages[i].filenames == NULL)
             continue;
         for (size_t j = 0; languages[i].filenames[j] != NULL; j++) {
@@ -71,7 +204,7 @@ const struct language *find_language(const char *path)
     if (dot == NULL || dot == base)
         return NULL;
     const char *ext = dot + 1;
-    for (size_t i = 0; i < NLANGS; i++) {
+    for (size_t i = 0; i < nlanguages; i++) {
         if (languages[i].exts == NULL)
             continue;
         for (size_t j = 0; languages[i].exts[j] != NULL; j++) {
@@ -84,12 +217,12 @@ const struct language *find_language(const char *path)
 
 const struct language *language_by_index(size_t index)
 {
-    if (index >= NLANGS)
+    if (index >= nlanguages)
         return NULL;
     return &languages[index];
 }
 
 size_t language_count(void)
 {
-    return NLANGS;
+    return nlanguages;
 }

@@ -16,6 +16,7 @@ struct language {
     const char *const *filenames;
 };
 
+int load_languages(const char *path);
 const struct language *find_language(const char *path);
 const struct language *language_by_index(size_t index);
 size_t language_count(void);

@@ -235,6 +235,7 @@ static void usage(FILE *out)
     fprintf(out, "      --exclude-dir N   Skip directories named N (repeatable)\n");
     fprintf(out, "      --include-lang N  Count only languages named N (repeatable)\n");
     fprintf(out, "      --exclude-lang N  Skip languages named N (repeatable)\n");
+    fprintf(out, "      --lang-file F     Read language definitions from F (default: %s)\n", LANG_FILE);
     fprintf(out, "      --threads N       Use N counting threads (default: CPU count)\n");
 }
 
@@ -414,6 +415,7 @@ int main(int argc, char **argv)
     const char *exclude_langs[argc];
     size_t nexclude_langs = 0;
     size_t threads = default_thread_count();
+    const char *lang_file = LANG_FILE;
 
     for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
@@ -427,6 +429,15 @@ int main(int argc, char **argv)
         }
         if (strcmp(arg, "--by-file") == 0) {
             by_file = true;
+            continue;
+        }
+        if (strcmp(arg, "--lang-file") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "yalocc: missing argument for %s\n", arg);
+                usage(stderr);
+                return 1;
+            }
+            lang_file = argv[++i];
             continue;
         }
         if (strcmp(arg, "--threads") == 0) {
@@ -457,10 +468,6 @@ int main(int argc, char **argv)
                 skip_dirs[nskip_dirs++] = value;
                 continue;
             }
-            if (!language_name_exists(value)) {
-                fprintf(stderr, "yalocc: unknown language: %s\n", value);
-                return 1;
-            }
             if (strcmp(arg, "--include-lang") == 0)
                 include_langs[ninclude_langs++] = value;
             else
@@ -477,6 +484,21 @@ int main(int argc, char **argv)
 
     if (npaths == 0)
         paths[npaths++] = ".";
+
+    if (load_languages(lang_file) != 0)
+        return 1;
+    for (size_t i = 0; i < ninclude_langs; i++) {
+        if (!language_name_exists(include_langs[i])) {
+            fprintf(stderr, "yalocc: unknown language: %s\n", include_langs[i]);
+            return 1;
+        }
+    }
+    for (size_t i = 0; i < nexclude_langs; i++) {
+        if (!language_name_exists(exclude_langs[i])) {
+            fprintf(stderr, "yalocc: unknown language: %s\n", exclude_langs[i]);
+            return 1;
+        }
+    }
 
     size_t nlangs = language_count();
     struct totals totals[nlangs + 1];

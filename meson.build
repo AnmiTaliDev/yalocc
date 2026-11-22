@@ -6,9 +6,12 @@ project(
   default_options: ['c_std=c99', 'warning_level=2'],
 )
 
+lang_dir = get_option('prefix') / get_option('datadir') / 'yalocc'
+
 add_project_arguments(
   '-D_POSIX_C_SOURCE=200809L',
   '-DVERSION="' + meson.project_version() + '"',
+  '-DLANG_FILE="' + lang_dir / 'languages.conf' + '"',
   language: 'c',
 )
 
@@ -22,4 +25,7 @@ executable(
   ],
   include_directories: 'src',
   dependencies: dependency('threads'),
+  install: true,
 )
+
+install_data('data/languages.conf', install_dir: lang_dir)
