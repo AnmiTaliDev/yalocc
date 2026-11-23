@@ -4,7 +4,7 @@ Command-line tool that counts blank, comment, and code lines in source files and
 
 ## Dependencies
 
-- C compiler (gcc or clang)
+- C compiler 
 - meson
 - ninja
 
